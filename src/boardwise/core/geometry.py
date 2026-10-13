@@ -414,7 +414,12 @@ class PadGeometry:
     #: 162b: the record's own ``holeType``, verbatim (``"ROUND"`` / ``"SLOT"`` /
     #: ``""`` when the file did not say).
     hole_type: str = ""
-    plated: bool = False
+    #: R2-2: the footprint PAD record's ``plated`` (是否金属化孔壁) — ``True``,
+    #: ``False`` (NPTH) or ``None`` when the record did not say. The parser's
+    #: reading decides :attr:`effective_layer_ids` (an NPTH pad is no barrel);
+    #: the ``False`` default only matters for a hand-built pad, which never
+    #: reaches that reading (its effective layers stay empty).
+    plated: bool | None = False
 
     @property
     def center(self) -> Point:
@@ -426,7 +431,9 @@ class PadGeometry:
 
         The through-hole signal, and the one the barrel reading uses. It is not
         :attr:`hole_diameter`: since 162b that field is ``None`` for a slot,
-        which is still a plated barrel.
+        which is still a plated barrel. A hole is not necessarily a *plated*
+        barrel: :attr:`plated` ``False`` is an NPTH, whose copper the parser
+        reads as its land only (R2-2).
         """
         return self.hole_width is not None or self.hole_diameter is not None
 

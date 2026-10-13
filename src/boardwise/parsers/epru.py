@@ -228,7 +228,10 @@ class PadTemplate:
     shape: str
     angle: float
     hole_diameter: float | None
-    plated: bool
+    #: R2-2: the record's ``plated`` (是否金属化孔壁), **tri-state** —
+    #: ``True`` plated, ``False`` non-plated (NPTH), ``None`` the record did not
+    #: say. See :func:`_plated_flag`.
+    plated: bool | None
     #: 162b: the hole's two extents and its own ``holeType``, so a ``SLOT`` is
     #: distinguishable from a round hole instead of being flattened into
     #: :attr:`hole_diameter` (which a slot now leaves ``None``).
@@ -410,6 +413,34 @@ def _pad_hole(pad: dict[str, Any]) -> tuple[float | None, float | None, float | 
     return diameter, width, height, hole_type
 
 
+def _plated_flag(pad: dict[str, Any]) -> bool | None:
+    """A PAD record's ``plated`` flag: ``True`` / ``False``, or ``None`` if unstated.
+
+    **This is the real plating field (R2-2).** Both format specifications name it
+    「是否金属化孔壁」 (v2.2 PCB 文档格式 §PAD item 16; v3 2025-10-21 §PAD item 20,
+    written ``"plated":1``), and the editor's own drill table and drill-file
+    export split PTH from NPTH on exactly this flag (3.2.186's ``pcb.js``:
+    ``plated ? "PTH" : "NPTH"``). It was never a wrong field; it was a field
+    every board fixture happens to set to ``true`` — all 3583 PAD records of the
+    14 fixtures, SMD pads and the M2/M3 screw holes included
+    (``outputs/R2/plated_census.txt``) — so no fixture tells a plated barrel from
+    a mechanical hole, and nothing consumed it.
+
+    Read **tri-state** rather than ``bool(body.get("plated", False))``, which is
+    what it used to be: an absent key is "the record did not say", not "not
+    plated". With NPTH now changing where a pad's copper is
+    (:func:`pad_effective_layers`), reading an omission as ``False`` would strip
+    the barrel off every pad of a file that leaves the key out. ``True``/``1``
+    and ``False``/``0`` are the spec's two spellings; anything else is ``None``.
+    """
+    value = pad.get("plated")
+    if value is True or (type(value) is int and value == 1):
+        return True
+    if value is False or (type(value) is int and value == 0):
+        return False
+    return None
+
+
 # --------------------------------------------------------------------------
 # document-level extraction
 # --------------------------------------------------------------------------
@@ -438,7 +469,7 @@ def pad_templates(document: Document) -> list[PadTemplate]:
                 shape=shape,
                 angle=_as_float(body.get("padAngle")),
                 hole_diameter=hole_diameter,
-                plated=bool(body.get("plated", False)),
+                plated=_plated_flag(body),
                 hole_width=hole_width,
                 hole_height=hole_height,
                 hole_type=hole_type,
@@ -1037,8 +1068,19 @@ def pad_effective_layers(
     part's solder pads on the top face and report the pairs it happens to
     overlap in plan view as touching copper.
 
-    Three cases, in the order they are decided:
+    Four cases, in the order they are decided:
 
+    0. **a non-plated hole (NPTH, R2-2)** — the pad has a hole and its record
+       says ``plated: false``: **no barrel**. The hole wall carries no copper, so
+       the pad occupies only the faces its *land* is on, and only if the land is
+       larger than the hole — a bare mechanical hole (land no larger than the
+       hole on either axis) occupies **no** copper layer, and the empty list is
+       then the physical answer as well as the skip signal. The land's faces are
+       the outer copper layers (``1`` top, ``2`` bottom — the editor's fixed ids)
+       for a multi-layer pad, else the placement's face like an SMD pad. No
+       fixture carries an NPTH pad (every PAD says ``plated: true``), so this
+       case is pinned on an injected copy (``tests/test_r2_2_plated.py``), and a
+       pad whose record says nothing (``plated is None``) stays a barrel.
     1. **a barrel** — the pad has a hole, or its ``layer_id`` is
        :data:`~boardwise.core.geometry.MULTI_LAYER_ID`: every copper layer.
        The plated barrel is continuous through the board and its lands exist on
@@ -1059,12 +1101,45 @@ def pad_effective_layers(
     claims.
     """
     copper = sorted({int(layer) for layer in copper_layers})
+    if template.has_hole and template.plated is False:
+        return _npth_land_layers(template, placement, copper)
     if template.has_hole or template.layer_id == MULTI_LAYER_ID:
         return copper
     face = placement.layer_id if placement.layer_id is not None else template.layer_id
     if face is None:
         return []
     return [int(face)]
+
+
+#: The editor's fixed ids for the two outer copper faces (``EPCB_LayerId.TOP`` /
+#: ``BOTTOM`` in the extension API). An NPTH pad's land can only be on these.
+_OUTER_COPPER = (1, 2)
+
+
+def _npth_land_layers(
+    template: PadTemplate, placement: ComponentPlacement, copper: list[int]
+) -> list[int]:
+    """Faces an NPTH pad's land occupies — case 0 of :func:`pad_effective_layers`.
+
+    The land exists only where the pad is larger than the hole. Extents are
+    compared as long/short axes (a slot's ``hole.width`` is its long axis, and
+    the pad's long axis may be its ``height``), so a land counts when it is
+    larger than the hole along either axis.
+    """
+    hole = sorted(
+        value for value in (template.hole_width, template.hole_height, template.hole_diameter)
+        if value is not None
+    )
+    hole_long = hole[-1] if hole else 0.0
+    hole_short = hole[0] if hole else 0.0
+    land_long = max(template.width, template.height)
+    land_short = min(template.width, template.height)
+    if land_long <= hole_long + 1e-6 and land_short <= hole_short + 1e-6:
+        return []  # a bare mechanical hole: no copper on any layer
+    if template.layer_id == MULTI_LAYER_ID:
+        return [layer for layer in _OUTER_COPPER if layer in copper]
+    face = placement.layer_id if placement.layer_id is not None else template.layer_id
+    return [] if face is None else [int(face)]
 
 
 def build_pads(

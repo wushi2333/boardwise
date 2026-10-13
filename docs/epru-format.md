@@ -254,6 +254,14 @@ document and are expressed relative to the footprint origin.
   described as a circle of its own length and `height` was never read.
 - `netName` is **empty here** even on the board — the net comes from `PAD_NET`
   (6.4). **[confirmed]**
+- `plated` is the hole-wall plating flag (「是否金属化孔壁」 in both the v2.2 and
+  the v3 format specifications; v3 writes it `1`/`0`) and the editor's drill
+  table / drill export splits PTH from NPTH on it. **[confirmed — R2-2]** Every
+  one of the 3583 PAD records in the board fixtures says `true` (SMD pads and the
+  M2/M3 screw holes included), so no fixture carries an NPTH. Since R2-2 the
+  parser reads it tri-state (absent ⇒ unstated, still a barrel) and an NPTH pad
+  is **no barrel**: it occupies only the outer faces its land is on, or no
+  copper layer at all when the land is no larger than the hole.
 - `padAngle` / `relativeAngle`: rotation of the pad shape and of the pad inside
   the component. The parser records `padAngle` but does not apply it to the
   position. **[inferred — unused]**
