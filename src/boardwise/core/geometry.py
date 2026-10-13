@@ -763,6 +763,15 @@ class PourShape:
     #: is the only description of that copper. :func:`boardwise.core.measure.
     #: _poured_supersedes` reads it to drop the superseded region.
     poured_from: str | None = None
+    #: R2-1: the shape as **copper presence** — ``[outline, void, void, ...]``
+    #: with every ``ARC`` expanded (:func:`boardwise.parsers.epru._path_rings`).
+    #: Filled for ``"poured"`` islands and ``"fill"`` records, empty for the
+    #: other kinds and for a hand-built shape. :attr:`points` is untouched (the
+    #: first ring's vertices with arcs as chords, what every reader since 125
+    #: measures), so this is a second view, not a correction of the first: a
+    #: reader that asks 「is there copper at this point」 needs the voids, which
+    #: :attr:`points` never had.
+    rings: list[list[Point]] = field(default_factory=list)
 
     @property
     def bbox(self) -> BBox | None:
@@ -785,9 +794,10 @@ class ProhibitRegion:
     """A copper-prohibition region — a ``REGION`` record (162b).
 
     EasyEDA's 禁止布线 / 铜禁布区: an area the designer marked as off-limits to
-    the thing :attr:`prohibit_types` names. Parsed and exposed, and **nothing
-    else**: no rule consumes these yet, so this class carries the record's own
-    fields and no reading of what they forbid.
+    the thing :attr:`prohibit_types` names. The class carries the record's own
+    fields and no reading of what they forbid; that reading lives in the one
+    rule that consumes these, ``pcb-keepout-violation`` (R2-1,
+    :mod:`boardwise.rules.pcb.keepout`).
 
     Measured on ``ProPrj_高速电机控制器_2026-09-16.epro2`` — the only board
     fixture with any, six of them in the PCB document:
@@ -823,6 +833,9 @@ class ProhibitRegion:
     #: the polygonal forms — exactly as :class:`SilkShape.radius` works.
     radius: float | None = None
     width: float = 0.0
+    #: R2-1: a polygonal region's rings with arcs expanded (the outline first);
+    #: empty for a ``CIRCLE`` region, whose shape is ``points[0]`` + ``radius``.
+    rings: list[list[Point]] = field(default_factory=list)
 
     @property
     def bbox(self) -> BBox | None:
@@ -1044,8 +1057,8 @@ class BoardGeometry:
     #: can look in both; deliberately **not** net-indexed (no net of a
     #: non-copper polygon is copper's business).
     non_copper_shapes: list[PourShape] = field(default_factory=list)
-    #: 162b: copper-prohibition regions (``REGION`` records). Parsed and
-    #: exposed; **no rule consumes them yet**.
+    #: 162b: copper-prohibition regions (``REGION`` records). Consumed since
+    #: R2-1 by ``pcb-keepout-violation``.
     prohibit_regions: list[ProhibitRegion] = field(default_factory=list)
     outline: BoardOutline | None = None
     #: 152: the placement artwork that is **not copper** — footprint silkscreen,

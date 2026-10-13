@@ -22,6 +22,7 @@ The framing names are re-exported below so existing importers keep working;
 from __future__ import annotations
 
 import json
+import math
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -336,6 +337,174 @@ def _path_points(path: Any) -> list[Point]:
             pending = []
         index += 1
     return points
+
+
+#: R2-1: the largest angle one chord of an expanded arc may span, in degrees.
+#: At 3° a chord sits within ``r * (1 - cos 1.5°)`` = 0.034 % of the radius of
+#: its arc — 0.05 mil on the largest keepout circle of the fixtures (r = 148.8
+#: mil), two orders of magnitude under the 4-mil pour clearance it has to
+#: resolve.
+ARC_STEP_DEG = 3.0
+
+
+def _arc_points(start: Point, end: Point, sweep_deg: float) -> list[Point]:
+    """The points of one ``ARC`` path segment after ``start``, ending at ``end``.
+
+    ``["ARC", sweep, x, y]`` is an arc from the current point to ``(x, y)``
+    sweeping ``sweep`` degrees, **counter-clockwise when positive**. The centre
+    is derived exactly as the editor derives it (3.2.186 ``pcb.js``
+    ``build5(start, end, sweep)``): with ``i = end - start`` and ``n`` the unit
+    left normal of ``i``, the radius is ``|i| / 2 / sin(|θ| / 2)`` and the centre
+    is ``end + rot(n, |θ|/2) * r`` for ``θ > 0``, ``start - rot(n, |θ|/2) * r``
+    otherwise. A zero sweep or a zero chord is a straight step to ``end``.
+    """
+    theta = math.radians(sweep_deg)
+    dx, dy = end.x - start.x, end.y - start.y
+    chord = math.hypot(dx, dy)
+    half = abs(theta) / 2.0
+    if chord <= 1e-12 or half <= 1e-12 or math.sin(half) <= 1e-12:
+        return [end]
+    nx, ny = -dy / chord, dx / chord
+    lx = nx * math.cos(half) - ny * math.sin(half)
+    ly = nx * math.sin(half) + ny * math.cos(half)
+    radius = chord / 2.0 / math.sin(half)
+    if theta > 0:
+        cx, cy = end.x + lx * radius, end.y + ly * radius
+    else:
+        cx, cy = start.x - lx * radius, start.y - ly * radius
+    begin = math.atan2(start.y - cy, start.x - cx)
+    steps = max(1, math.ceil(abs(sweep_deg) / ARC_STEP_DEG))
+    points = [
+        Point(cx + radius * math.cos(begin + theta * k / steps),
+              cy + radius * math.sin(begin + theta * k / steps))
+        for k in range(1, steps)
+    ]
+    points.append(end)
+    return points
+
+
+def _cubic_points(start: Point, c1: Point, c2: Point, end: Point, steps: int = 16) -> list[Point]:
+    """A ``C`` (cubic Bézier) path segment after ``start``, ending at ``end``."""
+    points = []
+    for k in range(1, steps):
+        t = k / steps
+        u = 1.0 - t
+        points.append(Point(
+            u * u * u * start.x + 3 * u * u * t * c1.x + 3 * u * t * t * c2.x + t * t * t * end.x,
+            u * u * u * start.y + 3 * u * u * t * c1.y + 3 * u * t * t * c2.y + t * t * t * end.y,
+        ))
+    points.append(end)
+    return points
+
+
+def _ring_points(values: Sequence[Any]) -> list[Point]:
+    """One closed ring of a path, with every ``ARC`` / ``C`` expanded.
+
+    The command reading is the editor's (``build8``): a ring starts with its
+    first point, a command word is **sticky** (numbers after ``"L"`` keep
+    drawing lines until the next word), ``"ARC"`` takes ``sweep, x, y``, ``"C"``
+    takes two control points and an end point. ``["R", x, y, w, h, rot, r]``
+    and ``["CIRCLE", x, y, r]`` are whole rings. A command this reader does not
+    know, or a ring cut short, yields the empty ring — a partial outline would
+    be a shape the file never drew.
+    """
+    values = list(values)
+    if not values:
+        return []
+    head = str(values[0]).upper() if isinstance(values[0], str) else ""
+    if head == "CIRCLE":
+        nums = [_as_float(v) for v in values[1:4]]
+        if len(nums) < 3 or nums[2] <= 0:
+            return []
+        steps = int(round(360.0 / ARC_STEP_DEG))
+        return [
+            Point(nums[0] + nums[2] * math.cos(2 * math.pi * k / steps),
+                  nums[1] + nums[2] * math.sin(2 * math.pi * k / steps))
+            for k in range(steps)
+        ]
+    if head == "R":
+        nums = [_as_float(v) for v in values[1:]]
+        if len(nums) < 4:
+            return []
+        x, y, w, h = nums[0], nums[1], nums[2], nums[3]
+        rotation = nums[4] if len(nums) > 4 else 0.0
+        if rotation:
+            # The rotation's pivot is not documented and no fixture rotates an
+            # area rectangle; an unrotated outline would be a shape the file
+            # did not draw, so the ring is withheld instead of guessed.
+            return []
+        radius = min(nums[5] if len(nums) > 5 else 0.0, w / 2.0, h / 2.0)
+        if radius <= 0:
+            return [Point(x, y), Point(x + w, y), Point(x + w, y - h), Point(x, y - h)]
+        # Corners rounded with quarter arcs, clockwise from the top edge (height
+        # runs along -y, as `_path_points` documents): every corner turns -90°.
+        ring = [Point(x + radius, y), Point(x + w - radius, y)]
+        ring += _arc_points(ring[-1], Point(x + w, y - radius), -90.0)
+        ring.append(Point(x + w, y - h + radius))
+        ring += _arc_points(ring[-1], Point(x + w - radius, y - h), -90.0)
+        ring.append(Point(x + radius, y - h))
+        ring += _arc_points(ring[-1], Point(x, y - h + radius), -90.0)
+        ring.append(Point(x, y - radius))
+        ring += _arc_points(ring[-1], Point(x + radius, y), -90.0)[:-1]
+        return ring
+    if head or len(values) < 2:
+        return []
+    ring = [Point(_as_float(values[0]), _as_float(values[1]))]
+    command = ""
+    index = 2
+    need = {"L": 2, "ARC": 3, "C": 6}
+    while index < len(values):
+        item = values[index]
+        if isinstance(item, str):
+            command = item.upper()
+            index += 1
+            continue
+        if command not in need:
+            return []
+        chunk = values[index:index + need[command]]
+        if len(chunk) < need[command] or any(isinstance(v, str) for v in chunk):
+            return []
+        nums = [_as_float(v) for v in chunk]
+        if command == "L":
+            ring.append(Point(nums[0], nums[1]))
+        elif command == "ARC":
+            ring.extend(_arc_points(ring[-1], Point(nums[1], nums[2]), nums[0]))
+        else:
+            ring.extend(_cubic_points(ring[-1], Point(nums[0], nums[1]), Point(nums[2], nums[3]), Point(nums[4], nums[5])))
+        index += need[command]
+    if len(ring) > 1 and abs(ring[0].x - ring[-1].x) <= 1e-9 and abs(ring[0].y - ring[-1].y) <= 1e-9:
+        ring.pop()
+    return ring
+
+
+def _path_rings(path: Any, scale: float = 1.0) -> list[list[Point]]:
+    """Every ring of an area ``path`` — the outline **and its holes** (R2-1).
+
+    :func:`_path_points` reads only the first ring and keeps an arc's end point
+    alone, which is right for what it serves (a polygon's vertices, unchanged
+    since 125) and wrong for one question: *is there copper at this point?* A
+    ``POURED`` island is an outline plus the voids the pour engine cut — around
+    every foreign pad, and around every copper keepout — and those voids are
+    rings 2..n, typically two 180° ``ARC`` s each (a circle). Measured on the
+    高速电机控制器 PCB2: the bottom ``PGND`` pour's voids around its five keepout
+    circles (r 93.84) are circles of r 97.94 — the 4-mil pour clearance — so a
+    reader without the voids sees a solid pour across all five keepouts.
+
+    Returns ``[outer, hole, hole, ...]`` in ``scale`` × file units (the
+    ``POURED`` 1:10 frame uses ``POURED_SCALE``); a ring that does not decode,
+    or has fewer than three points, is left out.
+    """
+    if not isinstance(path, Sequence) or isinstance(path, (str, bytes)) or not path:
+        return []
+    raw_rings = path if isinstance(path[0], (list, tuple)) else [path]
+    rings: list[list[Point]] = []
+    for raw in raw_rings:
+        if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+            continue
+        ring = _ring_points(raw)
+        if len(ring) >= 3:
+            rings.append([Point(p.x * scale, p.y * scale) for p in ring] if scale != 1.0 else ring)
+    return rings
 
 
 def _pad_diameter(pad: dict[str, Any], where: str) -> tuple[float, float, str]:
@@ -1428,14 +1597,24 @@ def collect_pcb_context(
                 # is copper the pour engine explicitly did not create. The
                 # shapes share the record's id, so a reader that wants the
                 # whole result groups on it.
+                fill_elements = _pour_fill_elements(body)
                 islands = [
                     [
                         Point(p.x * POURED_SCALE, p.y * POURED_SCALE)
                         for p in _path_points(element.get("path"))
                     ]
-                    for element in _pour_fill_elements(body)
+                    for element in fill_elements
                 ]
-                islands = [poly for poly in islands if len(poly) >= 3]
+                # R2-1: the same islands with their voids and arcs, read beside
+                # `points` (which stays exactly what 135 parsed).
+                island_rings = [
+                    _path_rings(element.get("path"), POURED_SCALE)
+                    for element in fill_elements
+                ]
+                kept = [
+                    (poly, rings) for poly, rings in zip(islands, island_rings) if len(poly) >= 3
+                ]
+                islands = [poly for poly, _rings in kept]
                 if not islands:
                     stats.poured_without_fill += 1
                 parent = poured_parents.get(_poured_parent_id(record))
@@ -1498,6 +1677,9 @@ def collect_pcb_context(
                     points=points,
                     width=_as_float(body.get("width")),
                     fill_style=body.get("fillStyle"),
+                    # R2-1: a FILL's outline and voids, arcs expanded. POLY and
+                    # POUR keep none — no reader asks them for copper presence.
+                    rings=_path_rings(path) if rtype == "FILL" else [],
                     poly_type=poly_type,
                 )
                 if _carries_copper(context.layers, shape.layer_id):
@@ -1522,13 +1704,14 @@ def collect_pcb_context(
                         points=poly,
                         fill_style=body.get("fillStyle"),
                         poured_from=_poured_parent_id(record),
+                        rings=rings,
                     )
-                    for poly in islands
+                    for poly, rings in kept
                 )
         elif rtype == "REGION":
-            # 162b: a copper-prohibition region. Parsed and exposed only — no
-            # rule reads `context.prohibit_regions` yet, deliberately: this
-            # batch adds the reading, not a verdict.
+            # 162b: a copper-prohibition region. 162b parsed it; R2-1's
+            # `pcb-keepout-violation` is its first reader, and reads `rings`
+            # (the polygon form with any arcs expanded) beside the circle form.
             points, radius, _arcs = _artwork_path(body.get("path"))
             context.prohibit_regions.append(
                 ProhibitRegion(
@@ -1546,6 +1729,7 @@ def collect_pcb_context(
                     points=points,
                     radius=radius,
                     width=_as_float(body.get("width")),
+                    rings=[] if radius is not None else _path_rings(body.get("path")),
                 )
             )
         elif rtype != "DOCHEAD":

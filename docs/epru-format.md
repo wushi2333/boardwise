@@ -509,9 +509,23 @@ truncated last line of the fixture.
   ```
 
   Filed as `BoardGeometry.prohibit_regions` (board coordinates; the circle form
-  keeps its centre and radius, the rectangle form its four corners). **No rule
-  reads them yet** — the reading is parsed and exposed, and a verdict needs a
-  rule that does not exist.
+  keeps its centre and radius, the rectangle form its four corners, and since
+  R2-1 a polygon form also carries `rings` with any `ARC` expanded). **Read
+  since R2-1 by `pcb-keepout-violation`.** `prohibitType` is written as **words**
+  (`["COPPER"]` here) although both format specifications document only numeric
+  codes; the editor's own code (3.2.186) has the word set `COMPONENT / VIA /
+  TRACK / FILL / COPPER / PLANE` and maps the codes `1 → TRACK+FILL,
+  2 → COMPONENT, 3 → VIA, 4 → COPPER+PLANE, 5 → TRACK, 6 → FILL, 7 → COPPER,
+  8 → PLANE` — so `COPPER` is 「禁止覆铜」, and its DRC applies it to **poured
+  copper** on the same layer (or every layer when the region is on layer 12).
+  `regionType` is `PROHIBIT` or `CONSTRAINT`.
+
+  A `POURED` island's `path` is a list of rings — the outline, then one ring per
+  **void** the pour engine cut (around foreign pads, and around every copper
+  keepout; usually two 180° `ARC`s each). `_path_points` keeps only the first
+  ring; `_path_rings` (R2-1) keeps all of them with arcs expanded by the editor's
+  own `build5` construction (`["ARC", sweep, x, y]`: from the current point to
+  `(x, y)`, counter-clockwise for a positive sweep).
 
 `POUR` and `REGION` were **also absent from `KNOWN_RECORD_TYPES`** until 162b,
 which changed nothing about what they carry: every board carrying one reported a

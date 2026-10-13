@@ -176,6 +176,7 @@ def test_the_builtin_pcb_rule_list_is_the_126b_distance_pair_then_the_126c_pair(
         "pcb-component-spacing",
         "pcb-track-ampacity",
         "pcb-voltage-spacing",
+        "pcb-keepout-violation",  # R2-1, appended last
     ]
     assert all(isinstance(rule, PcbRule) for rule in BUILTIN_PCB_RULES)
     # The schematic side is untouched by this file: its list is the 011-family
@@ -376,6 +377,7 @@ def test_run_pcb_review_reads_every_pcb_document_of_the_foc_fixture():
             "pcb-derating-package",
             "pcb-component-spacing",
             "pcb-track-ampacity", "pcb-voltage-spacing",
+            "pcb-keepout-violation",  # R2-1, appended last
         ]
         for index in board["findings"]:
             assert findings[index].board == board["title"]
@@ -1045,9 +1047,15 @@ def test_the_rulebody_digest_covers_the_pcb_subpackage():
     # 652 万次真实调用中两守卫逐位不同 24 次，全换任一守卫 881 条 PCB finding 逐条
     # 不变（`outputs/R2/guard_flip_experiment.json`），精确零守卫在下溢边上除零。
     # 行为锚：`tests/test_r2_4_geometry_consolidation.py` + 既有 126b/133d/164c 冻结表。
+    # **R2-1 moved the recursive one again** — c0a45f39 -> f45cfd99，direct 仍
+    # `8269e601`（wushi2333 2026-10-13）：`rules/pcb/` 新增 `keepout.py`
+    # （`pcb-keepout-violation`，162b 解析的 REGION 禁布区的第一个读者；类型词表
+    # 与「哪种禁布约束哪类图元、按什么层」取自立创 EDA Pro 3.2.186 自身代码），
+    # `rules/pcb/__init__.py` 包说明加一条。既有规则零改动、14 夹具零新增 finding；
+    # 行为锚：`tests/test_r2_1_keepout.py`（合成板逐类 + 电机板注入两例）。
     assert recursive != old_digest, "the subpackage is inside the recipe now"
     assert old_digest == "8269e601"
-    assert recursive == "c0a45f39", (
+    assert recursive == "f45cfd99", (
         "the measured value of the widened recipe over this tree; if a rule body "
         "changed since, update this together with the note in test_017"
     )
